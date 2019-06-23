@@ -10,7 +10,7 @@ setup(
     name='beets_similarity',
     version='0.1.0',
     description='Plugin for the music library manager Beets.',
-    long_description=read('doc/package.rst'),
+    long_description=read('README.rst'),
     url='https://github.com/SusannaMaria/beets-similarity',
     download_url='https://github.com/SusannaMaria/beets-similarity.git',
     author='Susanna Maria Hepp',
