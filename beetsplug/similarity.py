@@ -26,10 +26,12 @@ import os.path
 from networkx.readwrite import json_graph
 import json
 
+
 try:
     from urllib import quote  # Python 2.X
 except ImportError:
     from urllib.parse import quote  # Python 3+
+    from urllib.parse import quote_plus
 
 
 LASTFM = pylast.LastFMNetwork(api_key=plugins.LASTFM_KEY)
@@ -89,23 +91,38 @@ class SimilarityPlugin(plugins.BeetsPlugin):
             type="int"
         )
 
+        cmd.parser.add_option(
+            u'-u', u'--update', dest='update',
+            action='store_true', default=False,
+            help=u'update data of jsonfile'
+        )
+
+        cmd.parser.add_option(
+            u'-c', u'--convert', dest='convert',
+            action='store_true', default=False,
+            help=u'convert graph'
+        )
+
         def func(lib, opts, args):
 
             self.config.set_args(opts)
             jsonfile = self.config['json'].as_str()
             force = self.config['force']
+            update = self.config['update']
+            convert = self.config['convert']
             if (self.config['depth']):
                 depth = self.config['depth'].get(int)
             else:
                 depth = 0
             items = lib.items(ui.decargs(args))
 
-            self.import_similarity(lib, items, jsonfile, depth, force)
+            self.import_similarity(lib, items, jsonfile,
+                                   depth, force, update, convert)
 
         cmd.func = func
         return [cmd]
 
-    def import_similarity(self, lib, items, jsonfile, depth, force):
+    def import_similarity(self, lib, items, jsonfile, depth, force, update, convert):
         """
         Import gml-file which contains similarity.
 
@@ -117,24 +134,27 @@ class SimilarityPlugin(plugins.BeetsPlugin):
                                                                 os.R_OK):
             self._log.info(u'import of json file')
             self.import_graph(fullpath)
-            # create node for each similar artist
-            self.collect_artists(items)
-            # create node for each similar artist
-            self.get_similar(lib, depth)
-            self.create_graph(fullpath)
+
+            if update:
+                # create node for each similar artist
+                self.collect_artists(items)
+                self.create_graph(lib,fullpath)
+                # create node for each similar artist
+                self.get_similar(lib, depth, fullpath)
         else:
             self._log.info(u'Pocessing last.fm query')
             # create node for each similar artist
             self.collect_artists(items)
             # create node for each similar artist
-            self.get_similar(lib, depth)
-            self.create_graph(fullpath)
+            self.get_similar(lib, depth, fullpath)
+
         self._log.info(u'Artist owned: {}', len(self._artistsOwned))
         self._log.info(u'Artist foreign: {}', len(self._artistsForeign))
         self._log.info(u'Relations: {}', len(self._relations))
 
     def collect_artists(self, items):
         """Collect artists from query."""
+
         for item in items:
             if item['mb_albumartistid']:
                 artistnode = ArtistNode(item['mb_albumartistid'],
@@ -142,6 +162,7 @@ class SimilarityPlugin(plugins.BeetsPlugin):
                                         "",
                                         True)
                 artistnode['group'] = 1
+                artistnode['owned'] = True
                 if artistnode not in self._artistsOwned:
                     lastfmurl = u''
                     try:
@@ -159,11 +180,13 @@ class SimilarityPlugin(plugins.BeetsPlugin):
 
                     artistnode['lastfmurl'] = lastfmurl
                     self._log.info(
-                        u'collect: {}-{}', item['mb_albumartistid'],
-                        item['albumartist'])
+                        u'collect: {}', artistnode)
                     self._artistsOwned.append(artistnode)
 
-    def get_similar(self, lib, depth):
+        #print("count {} {}".format(len(items),len(self._artistsOwned) ))
+        return
+
+    def get_similar(self, lib, depth, fullpath):
         """Collect artists from query."""
         depthcounter = 1
 
@@ -179,29 +202,36 @@ class SimilarityPlugin(plugins.BeetsPlugin):
             for artist in self._artistsOwned:
                 if not artist['checked']:
                     self._log.info(u'Artist: {}-{}', artist['mbid'],
-                                   artist['name'])
+                                   artist['lastfmurl'])
                     try:
                         lastfm_artist = LASTFM.get_artist_by_mbid(
                             artist['mbid'])
                     except PYLAST_EXCEPTIONS as exc:
                         try:
-                            self._log.debug(u'last.fm error: {0}', exc)
-                            lastfm_artist = LASTFM.get_artist(
-                                quote(artist['name']))
+                            self._log.info(u'last.fm error: {0}', exc)
+
+                            val=lib.items('mb_albumartistid:' + quote(artist['mbid']))
+                            valtmp = val[0]['artist']
+                            #valtmp = quote_plus(valtmp)
+                            print(valtmp)                            
+                            lastfm_artist = LASTFM.get_artist(valtmp)
                         except PYLAST_EXCEPTIONS as exc:
-                            self._log.debug(u'2 last.fm error: {0}', exc)
+                            self._log.info(u'2 last.fm error: {0}', exc)
                             continue
                     try:
                         similar_artists = lastfm_artist.get_similar(10)
+                        artist['checked'] = True
                     except pylast.WSError as exc:
-                        similar_artists = []   
-                    artist['checked'] = True
+                        similar_artists = []
+                        artist['checked'] = False
+                        self._log.info(u'2 last.fm error: {0}', exc)
+
 
                     for artistinfo in similar_artists:
                         mbid = artistinfo[0].get_mbid()
                         name = artistinfo[0].get_name()
                         lastfmurl = artistinfo[0].get_url()
-                        # print("sim artists:",lastfmurl)
+                        print("sim artists:",lastfmurl)
 
                         if name:
                             artistnode = ArtistNode(mbid, quote(name), lastfmurl)
@@ -227,16 +257,17 @@ class SimilarityPlugin(plugins.BeetsPlugin):
 
                             # if relation not in _relations:
                             self._relations.append(relation)
+                    self.create_graph(lib,fullpath)
             self._artistsOwned.extend(artistsshadow)
             del artistsshadow[:]
             if not havechilds:
                 break
 
-    def create_graph(self, jsonfile):
+    def create_graph(self, lib, jsonfile):
         """Create graph out of collected artists and relations."""
         for relation in self._relations:
-            G.add_edge(relation['source_lastfmurl'],
-                       relation['target_lastfmurl'],
+            G.add_edge(relation['source_mbid'],
+                       relation['target_mbid'],
                        smbid=relation['source_mbid'],
                        tmbid=relation['target_mbid'],
                        slastfmurl=relation['source_lastfmurl'],
@@ -248,34 +279,33 @@ class SimilarityPlugin(plugins.BeetsPlugin):
 
         custom_labels = {}
         for owned_artist in self._artistsOwned:
-            G.add_node(owned_artist['lastfmurl'],
+            G.add_node(owned_artist['mbid'],
                        mbid=owned_artist['mbid'],
                        group=owned_artist['group'],
                        checked=owned_artist['checked'],
                        name=quote(owned_artist['name']),
-                       lastfmurl=owned_artist['lastfmurl']
+                       lastfmurl=owned_artist['lastfmurl'],
+                       myname=owned_artist['myname']
                        )
-            custom_labels[owned_artist['mbid']] = owned_artist['name']
+            custom_labels[owned_artist['mbid']] = owned_artist['mbid']
             self._log.debug(u'#{}', owned_artist['mbid'])
 
         for foreign_artist in self._artistsForeign:
             if foreign_artist not in self._artistsOwned:
-                custom_labels[foreign_artist['mbid']] = foreign_artist['name']
-                G.add_node(foreign_artist['lastfmurl'],
+                custom_labels[foreign_artist['mbid']] = foreign_artist['mbid']
+                G.add_node(foreign_artist['mbid'],
                            mbid=foreign_artist['mbid'],
                            group=foreign_artist['group'],
                            checked=foreign_artist['checked'],
                            name=quote(foreign_artist['name']),
-                           lastfmurl=foreign_artist['lastfmurl'])
+                           lastfmurl=foreign_artist['lastfmurl'],
+                           myname=foreign_artist['myname'])
                 self._log.debug(u'#{}', foreign_artist['mbid'])
 
         h = nx.relabel_nodes(G, custom_labels)
+
         data = json_graph.node_link_data(h)
-
-        #print(data["nodes"])
-        for artist in data["nodes"]:
-            print("{}|{}".format(artist["name"],artist["id"]))
-
+        #nx.write_gml(G, "test.gml")
         with open(jsonfile, 'w') as fp:
             json.dump(data, fp, indent=4, sort_keys=True)
 
@@ -287,17 +317,23 @@ class SimilarityPlugin(plugins.BeetsPlugin):
         i = json_graph.node_link_graph(data)
 
         for artist in i.nodes(data=True):
+
             self._log.debug(u'{}', artist)
             if artist[1].get('mbid'):
                 if artist[1]['group'] == 1:
                     artist[1]['owned'] = True
                 else:
                     artist[1]['owned'] = False
+                
                 artistnode = ArtistNode(artist[1]['mbid'], artist[0],
                                         artist[1]['lastfmurl'],
                                         artist[1]['group'],
                                         artist[1]['owned'],
                                         artist[1]['checked'])
+                artistnode['myname'] = artist[1]['myname']
+                if artist[1]['myname']=="":
+                    artistnode['myname'] = "unknown"
+                   
                 if artist[1]['group'] == 1:
                     if artistnode not in self._artistsOwned:
                         self._artistsOwned.append(artistnode)
@@ -305,6 +341,9 @@ class SimilarityPlugin(plugins.BeetsPlugin):
                     if artistnode not in self._artistsForeign:
                         self._artistsForeign.append(artistnode)
         for relitem in i.edges(data=True):
+            if not relitem[2]['tmbid']:
+                relitem[2]['tmbid']=relitem[1]
+
             relation = Relation(relitem[2]['smbid'],
                                 relitem[2]['tmbid'],
                                 relitem[2]['slastfmurl'],
@@ -405,6 +444,7 @@ class ArtistNode():
     owned = False
     checked = False
     group = 0
+    myname = u'unknown'
 
     def __init__(self, mbid, name, lastfmurl, group=0, owned=False,
                  checked=False):
@@ -438,14 +478,14 @@ class ArtistNode():
             return self.name
         elif key == 'owned':
             return self.owned
-        elif key == 'owned':
-            return self.owned
         elif key == 'checked':
             return self.checked
         elif key == 'group':
             return self.group
         elif key == 'lastfmurl':
             return self.lastfmurl
+        elif key == 'myname':
+            return self.myname            
         else:
             return None
 
@@ -457,16 +497,19 @@ class ArtistNode():
             self.name = value
         elif key == 'owned':
             self.owned = value
-        elif key == 'owned':
-            self.owned = value
         elif key == 'checked':
             self.checked = value
         elif key == 'lastfmurl':
             self.lastfmurl = value
         elif key == 'group':
             self.group = value
+        elif key == 'myname':
+            self.myname = value
 
     def tojson(self):
         """Define a setitem function."""
         return json.dumps(self, default=lambda o: o.__dict__,
                           sort_keys=True, indent=4)
+
+    def __str__(self):
+        return(self.mbid + " " + self.name + " " + self.myname + " "+ str(self.owned) + " " + str(self.checked) + " " + str(self.group) + " " + self.lastfmurl)
