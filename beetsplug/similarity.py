@@ -305,7 +305,7 @@ class SimilarityPlugin(plugins.BeetsPlugin):
         h = nx.relabel_nodes(G, custom_labels)
 
         data = json_graph.node_link_data(h)
-        #nx.write_gml(G, "test.gml")
+        nx.write_gml(G, "test.gml")
         with open(jsonfile, 'w') as fp:
             json.dump(data, fp, indent=4, sort_keys=True)
 
