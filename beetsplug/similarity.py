@@ -20,19 +20,29 @@ from beets import ui
 from beets import config
 from beets import plugins
 from beets.dbcore import types
-
+import matplotlib.pyplot as plt
 import networkx as nx
 import os.path
 from networkx.readwrite import json_graph
 import json
-
-
+import musicbrainzngs
 try:
     from urllib import quote  # Python 2.X
 except ImportError:
     from urllib.parse import quote  # Python 3+
     from urllib.parse import quote_plus
 
+
+try:
+    import pygraphviz
+    from networkx.drawing.nx_agraph import graphviz_layout
+except ImportError:
+    try:
+        import pydotplus
+        from networkx.drawing.nx_pydot import graphviz_layout
+    except ImportError:
+        raise ImportError("This example needs Graphviz and either "
+                            "PyGraphviz or PyDotPlus")
 
 LASTFM = pylast.LastFMNetwork(api_key=plugins.LASTFM_KEY)
 
@@ -66,6 +76,7 @@ class SimilarityPlugin(plugins.BeetsPlugin):
         self._artistsOwned = list()
         self._artistsForeign = list()
         self._relations = list()
+        self._custom_labels = {}
 
     def commands(self):
         """Define the command of plugin and its options and arguments."""
@@ -138,19 +149,67 @@ class SimilarityPlugin(plugins.BeetsPlugin):
             if update:
                 # create node for each similar artist
                 self.collect_artists(items)
-                self.create_graph(lib,fullpath)
                 # create node for each similar artist
                 self.get_similar(lib, depth, fullpath)
         else:
-            self._log.info(u'Pocessing last.fm query')
+            self._log.info(u'Processing query ... this can take a while')
             # create node for each similar artist
             self.collect_artists(items)
             # create node for each similar artist
             self.get_similar(lib, depth, fullpath)
-
+        #self.create_graphviz()
+        self.create_graph(lib)
         self._log.info(u'Artist owned: {}', len(self._artistsOwned))
         self._log.info(u'Artist foreign: {}', len(self._artistsForeign))
         self._log.info(u'Relations: {}', len(self._relations))
+        self._log.info(u'Nodes: {}', nx.classes.function.number_of_nodes(G))
+        self._log.info(u'Edges: {}', nx.classes.function.number_of_edges(G))
+
+        mbid = None
+        for item in items:
+            if item['mb_albumartistid']:
+                mbid = item['mb_albumartistid']
+                break
+        if mbid:
+            for nid, attrs in G.nodes(data=True):
+                if attrs.get('mbid') == mbid :
+                    nl_o = []
+                    nl_f = []
+                    print("Band:", G.nodes[nid]['myname'])
+                    print("Owned:")
+                    for neighbor_id in nx.classes.function.all_neighbors(G, nid):
+                        name = G.nodes[neighbor_id]['myname']
+                        if G.nodes[neighbor_id]['group']==0:
+                            nl_f.append(G[nid][neighbor_id])
+                        else:
+                            nl_o.append(G[nid][neighbor_id])
+                    for n in sorted( nl_o, key= lambda edge: edge['rate'],reverse=True ):
+                        if nid == n['smbid']:
+                            fid = n['tmbid']
+                        else:
+                            fid = n['smbid']
+
+                        print("* {} {}".format(round(n['rate']),G.nodes[fid]['myname']))
+                    print("Not owned:")
+                    for n in sorted( nl_f, key= lambda edge: edge['rate'],reverse=True ):
+                        if nid == n['smbid']:
+                            fid = n['tmbid']
+                        else:
+                            fid = n['smbid']
+
+                        print("* {} {}".format(round(n['rate']),G.nodes[fid]['lastfmurl']))
+                    break
+
+
+    def create_graphviz(self):
+        """Create graph out of collected artists and relations."""
+        plt.figure(figsize=(6,8))
+        pos=graphviz_layout(G)
+        nx.draw_networkx_nodes(G,pos,nodelist=G.nodes(),node_size=5, linewidths=0.1,vmin=0,vmax=1,alpha=0.8, node_color=[D[n] for n in G.nodes()])
+        nx.draw_networkx_edges(G,pos,edgelist=G.edges(),width=0.1, edge_color="black",alpha=0.6)
+        plt.axis('off')
+        plt.tight_layout()
+        plt.savefig("lanl_routes.png")
 
     def collect_artists(self, items):
         """Collect artists from query."""
@@ -163,6 +222,7 @@ class SimilarityPlugin(plugins.BeetsPlugin):
                                         True)
                 artistnode['group'] = 1
                 artistnode['owned'] = True
+                artistnode['myname'] = item['albumartist']
                 if artistnode not in self._artistsOwned:
                     lastfmurl = u''
                     try:
@@ -179,11 +239,9 @@ class SimilarityPlugin(plugins.BeetsPlugin):
                             self._log.debug(u'1 last.fm error: {0}', exc)
 
                     artistnode['lastfmurl'] = lastfmurl
-                    self._log.info(
+                    self._log.debug(
                         u'collect: {}', artistnode)
                     self._artistsOwned.append(artistnode)
-
-        #print("count {} {}".format(len(items),len(self._artistsOwned) ))
         return
 
     def get_similar(self, lib, depth, fullpath):
@@ -201,7 +259,7 @@ class SimilarityPlugin(plugins.BeetsPlugin):
             artistsshadow = list()
             for artist in self._artistsOwned:
                 if not artist['checked']:
-                    self._log.info(u'Artist: {}-{}', artist['mbid'],
+                    self._log.debug(u'Artist: {}-{}', artist['mbid'],
                                    artist['lastfmurl'])
                     try:
                         lastfm_artist = LASTFM.get_artist_by_mbid(
@@ -213,7 +271,7 @@ class SimilarityPlugin(plugins.BeetsPlugin):
                             val=lib.items('mb_albumartistid:' + quote(artist['mbid']))
                             valtmp = val[0]['artist']
                             #valtmp = quote_plus(valtmp)
-                            print(valtmp)                            
+                            #print(valtmp)                            
                             lastfm_artist = LASTFM.get_artist(valtmp)
                         except PYLAST_EXCEPTIONS as exc:
                             self._log.info(u'2 last.fm error: {0}', exc)
@@ -231,22 +289,36 @@ class SimilarityPlugin(plugins.BeetsPlugin):
                         mbid = artistinfo[0].get_mbid()
                         name = artistinfo[0].get_name()
                         lastfmurl = artistinfo[0].get_url()
-                        print("sim artists:",lastfmurl)
+                        #print("sim artists:",lastfmurl," ",mbid)
 
                         if name:
                             artistnode = ArtistNode(mbid, quote(name), lastfmurl)
-                            if len(lib.items('artist:' + quote(name))) > 0:
+                            if len(lib.items('artist:' + name)) > 0:
                                 if ((artistnode not in
                                      self._artistsOwned) and
                                     (artistnode not in
                                      artistsshadow)):
                                     artistnode['group'] = 1
+                                    artistnode['myname'] = name
+                                    artistnode['owned'] = True
+
                                     artistsshadow.append(artistnode)
                                     self._log.info(u'I own this: {}', name)
                                     havechilds = True
                             else:
                                 if artistnode not in self._artistsForeign:
+                                    if not mbid:
+                                        result = musicbrainzngs.search_artists(artist=name)
+
+                                        for artist_mb in result['artist-list']:
+                                            #print(u"{id}: {name}".format(id=artist_mb['id'], name=artist_mb["name"]))
+                                            mbid=artist_mb['id']
+                                            artistnode['mbid']=mbid
+                                            break
+
                                     artistnode['group'] = 0
+                                    artistnode['myname'] = name
+                                    artistnode['owned'] = False
                                     self._artistsForeign.append(artistnode)
 
                             relation = Relation(artist['mbid'],
@@ -257,14 +329,52 @@ class SimilarityPlugin(plugins.BeetsPlugin):
 
                             # if relation not in _relations:
                             self._relations.append(relation)
-                    self.create_graph(lib,fullpath)
+                    
+
             self._artistsOwned.extend(artistsshadow)
             del artistsshadow[:]
+            self.create_graph(lib)
+            self.save_graph(fullpath)
             if not havechilds:
                 break
+            
 
-    def create_graph(self, lib, jsonfile):
+    def save_graph(self, jsonfile):
+        h = nx.relabel_nodes(G, self._custom_labels)
+
+        data = json_graph.node_link_data(h)
+        with open(jsonfile, 'w') as fp:
+            json.dump(data, fp, indent=4, sort_keys=True)
+
+    def create_graph(self, lib):
         """Create graph out of collected artists and relations."""
+        G.clear()
+        self._custom_labels = {}
+        for owned_artist in self._artistsOwned:
+            self._custom_labels[owned_artist['mbid']] = owned_artist['mbid']
+            G.add_node(owned_artist['mbid'],
+                       mbid=owned_artist['mbid'],
+                       group=owned_artist['group'],
+                       checked=owned_artist['checked'],
+                       name=quote(owned_artist['name']),
+                       lastfmurl=owned_artist['lastfmurl'],
+                       myname=owned_artist['myname']
+                       )
+            
+            self._log.debug(u'#{}', owned_artist['mbid'])
+
+        for foreign_artist in self._artistsForeign:
+            if foreign_artist not in self._artistsOwned:
+                self._custom_labels[foreign_artist['mbid']] = foreign_artist['mbid']
+                G.add_node(foreign_artist['mbid'],
+                           mbid=foreign_artist['mbid'],
+                           group=foreign_artist['group'],
+                           checked=foreign_artist['checked'],
+                           name=quote(foreign_artist['name']),
+                           lastfmurl=foreign_artist['lastfmurl'],
+                           myname=foreign_artist['myname'])
+                self._log.debug(u'#{}', foreign_artist['mbid'])
+
         for relation in self._relations:
             G.add_edge(relation['source_mbid'],
                        relation['target_mbid'],
@@ -276,38 +386,6 @@ class SimilarityPlugin(plugins.BeetsPlugin):
                        )
             self._log.debug(u'{}#{}', relation['source_mbid'],
                             relation['target_mbid'])
-
-        custom_labels = {}
-        for owned_artist in self._artistsOwned:
-            G.add_node(owned_artist['mbid'],
-                       mbid=owned_artist['mbid'],
-                       group=owned_artist['group'],
-                       checked=owned_artist['checked'],
-                       name=quote(owned_artist['name']),
-                       lastfmurl=owned_artist['lastfmurl'],
-                       myname=owned_artist['myname']
-                       )
-            custom_labels[owned_artist['mbid']] = owned_artist['mbid']
-            self._log.debug(u'#{}', owned_artist['mbid'])
-
-        for foreign_artist in self._artistsForeign:
-            if foreign_artist not in self._artistsOwned:
-                custom_labels[foreign_artist['mbid']] = foreign_artist['mbid']
-                G.add_node(foreign_artist['mbid'],
-                           mbid=foreign_artist['mbid'],
-                           group=foreign_artist['group'],
-                           checked=foreign_artist['checked'],
-                           name=quote(foreign_artist['name']),
-                           lastfmurl=foreign_artist['lastfmurl'],
-                           myname=foreign_artist['myname'])
-                self._log.debug(u'#{}', foreign_artist['mbid'])
-
-        h = nx.relabel_nodes(G, custom_labels)
-
-        data = json_graph.node_link_data(h)
-        nx.write_gml(G, "test.gml")
-        with open(jsonfile, 'w') as fp:
-            json.dump(data, fp, indent=4, sort_keys=True)
 
     def import_graph(self, jsonfile):
         """Import graph from previous created gml file."""
